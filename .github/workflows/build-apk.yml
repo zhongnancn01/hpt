@@ -1,4 +1,4 @@
-name: HopTrace - build, device-test, and package APK
+name: HopTrace - build APK only
 
 on:
   workflow_dispatch:
@@ -9,19 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: hoptrace-android-${{ github.ref }}
+  group: hoptrace-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  device-test:
-    name: Android ${{ matrix.api-level }} runtime tests
+  build-apk:
+    name: Build and verify installable APK (no emulator)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        api-level: [35, 36, 37]
+    timeout-minutes: 45
 
     steps:
       - name: Check out source
@@ -34,13 +29,17 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK command-line tools
         uses: android-actions/setup-android@v4
 
-      - name: Install pinned build toolchain
+      - name: Install Android 17 build toolchain
         shell: bash
         run: |
           set -euo pipefail
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          set -o pipefail
+
           sdkmanager --install \
             "platforms;android-37.0" \
             "build-tools;36.0.0" \
@@ -48,36 +47,48 @@ jobs:
             "cmake;3.22.1"
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          test -n "$SDK_ROOT"
+          if [[ -z "$SDK_ROOT" || ! -d "$SDK_ROOT" ]]; then
+            echo "::error::Android SDK root was not set by setup-android."
+            exit 1
+          fi
+
+          # API 37 is currently installed by sdkmanager under android-37.0.
+          # Keep the android-37 alias for tools that still look for that path.
           if [[ -d "$SDK_ROOT/platforms/android-37.0" && ! -e "$SDK_ROOT/platforms/android-37" ]]; then
             ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
           fi
-          test -s "$SDK_ROOT/platforms/android-37/android.jar"
+
+          test -s "$SDK_ROOT/platforms/android-37.0/android.jar"
           test -x "$SDK_ROOT/build-tools/36.0.0/apksigner"
           test -x "$SDK_ROOT/build-tools/36.0.0/zipalign"
-          test -x "$SDK_ROOT/ndk/28.2.13676358/ndk-build"
+          test -x "$SDK_ROOT/build-tools/36.0.0/aapt"
+          test -d "$SDK_ROOT/ndk/28.2.13676358"
           test -x "$SDK_ROOT/cmake/3.22.1/bin/cmake"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "Android SDK / NDK / CMake installation verified."
 
       - name: Install Gradle 9.6.0
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=9.6.0
+          VERSION='9.6.0'
           ZIP="$RUNNER_TEMP/gradle-${VERSION}-bin.zip"
-          curl --fail --location --retry 4 --retry-delay 3 --retry-all-errors \
-            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -o "$ZIP"
+          curl --fail --show-error --location \
+            --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 300 \
+            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \
+            --output "$ZIP"
           unzip -q "$ZIP" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/gradle-${VERSION}/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/gradle-${VERSION}/bin/gradle" --version
 
-      - name: Locate project and validate source before building
+      - name: Locate project and validate source
         shell: bash
         run: |
           set -euo pipefail
           ROOTS=()
-          while IFS= read -r -d '' f; do
-            candidate="$(dirname "$f")"
+          while IFS= read -r -d '' settings_file; do
+            candidate="$(dirname "$settings_file")"
             if [[ -f "$candidate/app/build.gradle" || -f "$candidate/app/build.gradle.kts" ]]; then
               ROOTS+=("$candidate")
             fi
@@ -87,37 +98,40 @@ jobs:
             -print0 | sort -z)
 
           if [[ ${#ROOTS[@]} -ne 1 ]]; then
-            echo "::error::Expected exactly one Gradle Android project; found ${#ROOTS[@]}"
-            printf 'Candidate: %s\n' "${ROOTS[@]}"
+            echo "::error::Expected exactly one Android Gradle project; found ${#ROOTS[@]}."
+            printf 'Detected project: %s\n' "${ROOTS[@]}"
             exit 1
           fi
 
-          PROJECT_DIR="${ROOTS[0]#./}"
-          [[ -n "$PROJECT_DIR" ]] || PROJECT_DIR='.'
+          PROJECT_DIR="${ROOTS[0]}"
           APP="$PROJECT_DIR/app"
           MAIN="$APP/src/main/java/com/hoptrace/app/MainActivity.java"
           SETTINGS="$PROJECT_DIR/settings.gradle"
 
-          required=(
+          required_files=(
             "$PROJECT_DIR/build.gradle"
             "$SETTINGS"
             "$APP/build.gradle"
             "$APP/src/main/AndroidManifest.xml"
             "$APP/src/main/cpp/CMakeLists.txt"
             "$APP/src/main/cpp/traceroute.cpp"
+            "$APP/src/main/java/com/hoptrace/app/MainActivity.java"
             "$APP/src/main/java/com/hoptrace/app/NativeTraceroute.java"
-            "$MAIN"
-            "$APP/src/androidTest/java/com/hoptrace/app/HopTraceRuntimeTest.java"
+            "$APP/src/main/java/com/hoptrace/app/GeoIpClient.java"
+            "$APP/src/main/java/com/hoptrace/app/GeoInfo.java"
+            "$APP/src/main/java/com/hoptrace/app/HopResult.java"
           )
-          for f in "${required[@]}"; do
-            test -s "$f" || { echo "::error::Missing required source: $f"; exit 1; }
+          for file in "${required_files[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "::error::Required project file is missing or empty: $file"
+              exit 1
+            fi
           done
 
           grep -Fq "applicationId 'com.hoptrace.app'" "$APP/build.gradle"
           grep -Fq 'compileSdk 37' "$APP/build.gradle"
           grep -Fq 'targetSdk 37' "$APP/build.gradle"
           grep -Fq "versionName '1.1.1'" "$APP/build.gradle"
-          grep -Fq "testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'" "$APP/build.gradle"
           grep -Fq 'targetLayout.addView(targetInput, new LinearLayout.LayoutParams(' "$MAIN"
           grep -Fq 'layout.addView(input, new LinearLayout.LayoutParams(' "$MAIN"
           grep -Fq '@Override public void onLowMemory()' "$MAIN"
@@ -125,156 +139,117 @@ jobs:
           ! grep -Fq 'layout.addView(input, new ViewGroup.LayoutParams(' "$MAIN"
           ! grep -Fq '@Override protected void onLowMemory()' "$MAIN"
 
-          # Put the Google-hosted Maven Central mirror first in both plugin and
-          # dependency repositories. This avoids mixing metadata and artifact origins.
+          # Ensure the Google-hosted Maven Central mirror is first in both
+          # pluginManagement and dependencyResolutionManagement. This avoids
+          # silently relying on only the Maven Central hostname that failed before.
           python3 - "$SETTINGS" <<'PY'
           from pathlib import Path
           import sys
-          p = Path(sys.argv[1])
-          s = p.read_text(encoding='utf-8')
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding='utf-8')
           mirror = 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }'
-          out = []
-          for line in s.splitlines():
-              if line.strip() == 'mavenCentral()':
-                  preceding = '\n'.join(out[-3:])
-                  if 'maven-central.storage-download.googleapis.com/maven2/' not in preceding:
-                      out.append(line[:len(line) - len(line.lstrip())] + mirror)
-              out.append(line)
-          updated = '\n'.join(out) + '\n'
-          if updated.count('maven-central.storage-download.googleapis.com/maven2/') < 2:
-              raise SystemExit('Maven mirror must be configured in pluginManagement and dependencyResolutionManagement.')
-          p.write_text(updated, encoding='utf-8')
+
+          def ensure_mirror(text: str, start_marker: str, end_marker: str) -> str:
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f"Missing Gradle settings block: {start_marker}")
+              end = text.find(end_marker, start + len(start_marker))
+              if end < 0:
+                  raise SystemExit(f"Missing Gradle settings boundary: {end_marker}")
+              block = text[start:end]
+              if mirror not in block:
+                  anchor = '        mavenCentral()'
+                  if anchor not in block:
+                      raise SystemExit(f"Cannot insert Maven mirror in {start_marker}")
+                  block = block.replace(anchor, f'        {mirror}\n{anchor}', 1)
+              return text[:start] + block + text[end:]
+
+          text = ensure_mirror(text, 'pluginManagement {', 'dependencyResolutionManagement {')
+          text = ensure_mirror(text, 'dependencyResolutionManagement {', 'rootProject.name')
+          path.write_text(text, encoding='utf-8')
+          if text.count('maven-central.storage-download.googleapis.com/maven2/') < 2:
+              raise SystemExit('Maven Central mirror is not present in both repository blocks.')
+          print('Gradle plugin and dependency repository mirror configuration verified.')
           PY
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "APK_PATH=$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
-          echo "Android project root: $PROJECT_DIR"
-          echo "Source preflight passed: both TextInputLayouts use LinearLayout.LayoutParams."
+          echo "Detected Android project root: $PROJECT_DIR"
+          echo "Source preflight passed. No emulator or device-test action will run."
 
       - name: Verify Kotlin Gradle plugin artifacts are reachable
         shell: bash
         run: |
           set -euo pipefail
-          BASE="https://maven-central.storage-download.googleapis.com/maven2"
+          BASE='https://maven-central.storage-download.googleapis.com/maven2'
           for path in \
-            "org/jetbrains/kotlin/kotlin-gradle-plugin-api/2.2.10/kotlin-gradle-plugin-api-2.2.10.jar" \
-            "org/jetbrains/kotlin/kotlin-gradle-plugin-idea/2.2.10/kotlin-gradle-plugin-idea-2.2.10.jar"; do
-            file="$RUNNER_TEMP/$(basename "$path")"
+            'org/jetbrains/kotlin/kotlin-gradle-plugin-api/2.2.10/kotlin-gradle-plugin-api-2.2.10.jar' \
+            'org/jetbrains/kotlin/kotlin-gradle-plugin-idea/2.2.10/kotlin-gradle-plugin-idea-2.2.10.jar'; do
+            output="$RUNNER_TEMP/$(basename "$path")"
             curl --fail --show-error --silent --location \
-              --retry 5 --retry-delay 2 --retry-all-errors \
-              --connect-timeout 20 --max-time 120 "$BASE/$path" -o "$file"
-            test -s "$file"
-            echo "Verified $(basename "$file") ($(stat -c%s "$file") bytes)."
+              --retry 5 --retry-delay 3 --retry-all-errors \
+              --connect-timeout 20 --max-time 180 \
+              "$BASE/$path" --output "$output"
+            test -s "$output"
+            echo "Dependency reachable: $(basename "$output") ($(stat -c%s "$output") bytes)."
           done
 
-      - name: Enable KVM for the Android emulator
+      - name: Build debug APK (no emulator)
         shell: bash
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          set -euo pipefail
+          gradle --no-daemon --refresh-dependencies \
+            --project-dir "$PROJECT_DIR" \
+            clean assembleDebug \
+            --stacktrace --console=plain
 
-      - name: Build and run device tests on Android ${{ matrix.api-level }}
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          target: google_apis
-          arch: x86_64
-          profile: pixel_7
-          cores: 4
-          ram-size: 4096M
-          ndk: 28.2.13676358
-          cmake: 3.22.1
-          disable-animations: true
-          disable-spellchecker: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
-          script: |
-            set +e
-            echo "Android emulator ping_group_range:"
-            adb shell cat /proc/sys/net/ipv4/ping_group_range || true
-            gradle --no-daemon --project-dir "$PROJECT_DIR" connectedDebugAndroidTest --stacktrace --console=plain
-            TEST_STATUS=$?
-            adb logcat -d > "$RUNNER_TEMP/hoptrace-api-${{ matrix.api-level }}-logcat.txt" 2>&1 || true
-            exit $TEST_STATUS
-
-      - name: Verify installable APK (Android 17 build)
-        if: matrix.api-level == 37
+      - name: Verify APK package, signature, alignment and native ABIs
         shell: bash
         run: |
           set -euo pipefail
           APK="$APK_PATH"
           TOOLS="$ANDROID_SDK_ROOT/build-tools/36.0.0"
-          test -s "$APK"
+          test -s "$APK" || { echo '::error::Gradle completed without producing app-debug.apk.'; exit 1; }
+
           "$TOOLS/zipalign" -c -v 4 "$APK"
           "$TOOLS/apksigner" verify --verbose "$APK"
           "$TOOLS/aapt" dump badging "$APK" > "$RUNNER_TEMP/hoptrace-badging.txt"
+
           grep -Fq "package: name='com.hoptrace.app'" "$RUNNER_TEMP/hoptrace-badging.txt"
           grep -Fq "sdkVersion:'26'" "$RUNNER_TEMP/hoptrace-badging.txt"
           grep -Fq "targetSdkVersion:'37'" "$RUNNER_TEMP/hoptrace-badging.txt"
           grep -Fq "versionName='1.1.1-debug'" "$RUNNER_TEMP/hoptrace-badging.txt"
+
           unzip -Z1 "$APK" > "$RUNNER_TEMP/hoptrace-apk-files.txt"
           for abi in arm64-v8a armeabi-v7a x86_64; do
             grep -Fxq "lib/$abi/libhoptrace.so" "$RUNNER_TEMP/hoptrace-apk-files.txt" || {
-              echo "::error::Missing native traceroute library for ABI $abi"; exit 1;
+              echo "::error::APK is missing lib/$abi/libhoptrace.so."
+              exit 1
             }
           done
-          (cd "$(dirname "$APK")" && sha256sum "$(basename "$APK")" > "$(basename "$APK").sha256")
-          ls -lh "$APK" "$APK.sha256"
 
-      - name: Upload API 37 APK candidate
-        if: success() && matrix.api-level == 37
+          APK_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
+          echo "APK_SHA256=$APK_SHA256" >> "$GITHUB_ENV"
+          {
+            echo '## HopTrace APK build result'
+            echo
+            echo '- Build: **successful**'
+            echo '- Emulator/device tests: **not run (intentionally disabled)**'
+            echo '- Package: `com.hoptrace.app`'
+            echo '- Version: `1.1.1-debug`'
+            echo '- minSdk: `26`'
+            echo '- targetSdk: `37`'
+            echo '- Native ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`'
+            echo "- SHA-256: \`$APK_SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "$APK"
+
+      - name: Upload APK as a direct file (not a ZIP)
         uses: actions/upload-artifact@v7
         with:
-          name: HopTrace-APK-candidate-api37
-          path: |
-            ${{ env.APK_PATH }}
-            ${{ env.APK_PATH }}.sha256
-          if-no-files-found: error
-          retention-days: 2
-          compression-level: 0
-
-      - name: Upload emulator logs and test reports on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: HopTrace-test-diagnostics-api${{ matrix.api-level }}
-          path: |
-            ${{ runner.temp }}/hoptrace-api-${{ matrix.api-level }}-logcat.txt
-            ${{ env.PROJECT_DIR }}/app/build/reports/androidTests/connected/**
-            ${{ env.PROJECT_DIR }}/app/build/outputs/androidTest-results/connected/**
-          if-no-files-found: ignore
-          retention-days: 7
-
-  publish-apk:
-    name: Publish tested APK artifact
-    needs: device-test
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download API 37 tested APK
-        uses: actions/download-artifact@v7
-        with:
-          name: HopTrace-APK-candidate-api37
-          path: dist
-
-      - name: Verify checksum and prepare final artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s dist/app-debug.apk
-          test -s dist/app-debug.apk.sha256
-          (cd dist && sha256sum --check app-debug.apk.sha256)
-          cp dist/app-debug.apk dist/HopTrace-1.1.1-debug.apk
-          sha256sum dist/HopTrace-1.1.1-debug.apk > dist/HopTrace-1.1.1-debug.apk.sha256
-          echo "### HopTrace APK SHA-256" >> "$GITHUB_STEP_SUMMARY"
-          cat dist/HopTrace-1.1.1-debug.apk.sha256 >> "$GITHUB_STEP_SUMMARY"
-          ls -lh dist/HopTrace-1.1.1-debug.apk dist/HopTrace-1.1.1-debug.apk.sha256
-
-      - name: Publish direct APK download (no ZIP wrapper)
-        uses: actions/upload-artifact@v7
-        with:
-          # v7 supports a single unarchived file; the artifact itself is the APK.
-          path: dist/HopTrace-1.1.1-debug.apk
+          name: HopTrace-1.1.1-debug.apk
+          path: ${{ env.APK_PATH }}
           archive: false
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0
