@@ -1,0 +1,60 @@
+HopTrace Android 1.2.0 — upgrade source status
+================================================
+
+Baseline
+- Derived from the user's already-working IPinfo City-level v1.1.1 project.
+- IPinfo provider, City-level token flow, loc parsing, seven-day cache,
+  public-IP-only filtering, and MapLibre/OpenFreeMap basemap are retained.
+- The build-only GitHub Actions workflow is retained; no emulator step is added.
+
+New features
+- Optional custom DNS using a numeric IPv4 or IPv6 resolver on port 53.
+  System DNS remains the default. Custom DNS supports A/AAAA queries and TCP
+  fallback for truncated UDP responses. The Java layer passes the numeric
+  target to JNI to prevent a second resolver lookup.
+- ICMP/UDP traceroute mode selector. The original IPv4 and IPv6 ICMP error
+  receive functions are preserved from the v1.1.1 source. UDP uses a separate
+  socket/error-queue path and destination-port-unreachable detection.
+- Shared MapLibre route renderer: line casing + route segments, individual
+  POP points and hop numbers, country-crossing highlights, first-POP labels
+  for newly encountered countries, click-to-view POP details, full-screen map.
+- Camera fitting is deferred until the geolocation lookup batch finishes, to
+  avoid repeated camera animations as asynchronous lookups return.
+
+Local checks completed in this authoring environment
+- C++ JNI source compiled with g++ -std=c++17 -Wall -Wextra -Werror.
+- UDP IPv4 loopback to 127.0.0.1 reached DESTINATION.
+- UDP IPv6 loopback to ::1 reached DESTINATION.
+- Custom DNS resolver compiled with javac -Xlint:all -Werror.
+- A and AAAA DNS response parser tests passed, including transaction-ID
+  mismatch rejection and numeric resolver-address validation.
+- End-to-end DNS query against local UDP DNS responders passed for A and AAAA
+  through both an explicitly selected IPv4 resolver (127.0.0.1:53) and an
+  explicitly selected IPv6 resolver (::1:53). Auto family fallback was checked
+  against the local IPv4 test resolver.
+- XML, workflow YAML, embedded shell syntax, source preflight, and ZIP integrity
+  are checked before packaging.
+
+Not verified here
+- This environment has no Android SDK/NDK, so a full Android Gradle APK build
+  cannot be executed here.
+- This environment denies unprivileged ICMP ping sockets. ICMP was preserved
+  from the known v1.1.1 native implementation, but not host-runtime tested here.
+- No Android 15/16/17 Firebase Test Lab run has yet been performed for v1.2.0.
+- MapLibre style download, click interactions, full-screen map presentation,
+  and route visualization still require Android Firebase/runtime verification.
+
+Build workflow
+- .github/workflows/build-apk.yml is build-only by design.
+- It installs Android SDK API 37, Build Tools 36.0.0, NDK 28.2.13676358,
+  CMake 3.22.1, and Gradle 9.6.0.
+- It validates the source and APK metadata/signature/alignment/native ABIs.
+- It does not start an Android Emulator or execute connectedDebugAndroidTest.
+- On success it publishes HopTrace-1.2.0-debug.apk as a direct artifact.
+
+Important limitations
+- Private, CGNAT, link-local, loopback, multicast, and documentation hops do
+  not have publicly resolvable IP geolocation and are not submitted to IPinfo.
+- IPinfo map coordinates are estimated database locations, not router GPS.
+- Route lines connect located POP estimates; they do not represent verified
+  fibre paths. Networks may filter ICMP/UDP traceroute responses.

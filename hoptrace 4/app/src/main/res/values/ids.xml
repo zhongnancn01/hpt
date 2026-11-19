@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="menu_ipinfo" type="id" />
+    <item name="dns_mode_group" type="id" />
+    <item name="dns_server_input" type="id" />
+    <item name="transport_mode_group" type="id" />
+</resources>
