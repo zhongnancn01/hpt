@@ -1,0 +1,67 @@
+HopTrace 1.1.1 — runtime-corrected, emulator-test-gated source (revision 6)
+==========================================================================
+
+The supplied Firebase Test Lab log was inspected in full (28,432 lines).
+It contains exactly one FATAL EXCEPTION for com.hoptrace.app:
+- MainActivity.buildScreen() line 171 passed generic ViewGroup.LayoutParams to
+  TextInputLayout.addView(TextInputEditText, ...).
+- Material TextInputLayout then cast that object to LinearLayout.LayoutParams
+  in updateInputLayoutMargins(), throwing ClassCastException before the main
+  Activity could finish creating its UI.
+- Robo's later LaunchFailedException is a consequence of that process death,
+  not a second independent crash.
+- The log contains no SIGSEGV, SIGABRT or UnsatisfiedLinkError for HopTrace.
+  Therefore it does not show a MapLibre or JNI crash; those features were not
+  reached by this run.
+
+Revision 6 source changes:
+- Main destination TextInputEditText is added with LinearLayout.LayoutParams.
+- IPinfo token dialog TextInputEditText is also added with LinearLayout.LayoutParams.
+- MainActivity.onLowMemory() is public, as required by ComponentCallbacks.
+- Auto-family DNS lookup now runs on the background trace executor, not the UI
+  thread, avoiding a potentially blocking resolver call during interaction.
+- App version is 1.1.1 (versionCode 7), so the new build is identifiable.
+
+Device-level Android instrumentation tests included:
+- MainActivity renders and its IPinfo settings dialog opens/closes.
+- MapLibre's OpenFreeMap style callback completes within 45 seconds.
+- Native IPv4 ICMP ping-socket traceroute reaches 127.0.0.1.
+- Native IPv6 ICMPv6 ping-socket traceroute reaches ::1.
+- IPinfo address filtering rejects loopback/private/ULA and accepts public
+  IPv4/IPv6 addresses.
+
+The GitHub Actions workflow runs connectedDebugAndroidTest on Android API 35,
+36 and 37. It publishes the APK artifact only when all three device test jobs
+and APK validation succeed. The APK is then checked for ZIP alignment, v2/v3
+signature, package name, minSdk, targetSdk, version and native libraries for
+arm64-v8a, armeabi-v7a and x86_64.
+
+Validation honestly completed in this working environment:
+- Full Firebase Logcat inspected and the single fatal stack identified.
+- Both TextInputLayout call sites inspected and corrected in source.
+- Source-level assertions, XML parsing, workflow YAML parsing, embedded Bash
+  syntax checks, C++ host syntax check and ZIP integrity checks are run before
+  packaging this archive.
+- A host Linux loopback runtime attempt was made for both IPv4 and IPv6. This
+  container reports /proc/sys/net/ipv4/ping_group_range as "1 0" and both
+  ping-socket creations return Permission denied. This is a container policy,
+  not evidence of an Android runtime failure. AOSP Android init scripts set
+  this range to "0 2147483647"; the emulator test logs the actual device value.
+
+Not completed in this working environment:
+- No Android SDK/NDK build was run here.
+- No emulator instrumentation test was run here.
+- No physical Android device test was run here.
+- The CI workflow is designed to perform the first Android 15/16/17 runtime
+  validation and withhold the final APK artifact if any test fails.
+
+Important constraints:
+- A successful emulator loopback test validates basic unprivileged ICMP socket
+  operation, not every carrier/OEM network. Some devices/networks can suppress
+  or deny ICMP, in which case traceroute cannot reveal every hop.
+- IP geolocation requires the user's own IPinfo City-level token. Hop locations
+  are database estimates, not verified router GPS positions.
+- The map uses the public OpenFreeMap style endpoint; internet access is needed.
+- Debug APK is for sideload/testing, not a Play Store release. If updating an
+  earlier APK signed by a different ephemeral GitHub Actions debug key, uninstall
+  that previous app before installing the new one.
